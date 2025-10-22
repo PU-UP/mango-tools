@@ -347,6 +347,7 @@ st.set_page_config(page_title="SLAM Log Dashboard", layout="wide")
 # --- Sidebar: data source selection ---
 st.sidebar.title("数据源")
 mode = st.sidebar.radio("选择模式", ["上传文件（离线）", "本地路径（实时追踪）"])
+multi_log = st.sidebar.checkbox("多日志模式", value=False, help="启用后可以同时处理多个日志文件")
 
 def ensure_time_dtype(df: pd.DataFrame) -> pd.DataFrame:
     if not df.empty and not pd.api.types.is_datetime64_any_dtype(df['time']):
@@ -380,45 +381,123 @@ df = pd.DataFrame()
 
 # --- File modes ---
 if mode == "上传文件（离线）":
-    up = st.sidebar.file_uploader("选择日志文件", type=["log", "txt"])
-    if up is not None:
-        text = up.read().decode('utf-8', errors='replace')
-        df = parse_uploaded_text(text)
-    else:
-        st.info("请在左侧上传日志文件。")
-else:
-    path = st.sidebar.text_input("本地日志路径", value=st.session_state.get("tail_path", ""))
-    auto = st.sidebar.toggle("自动刷新", value=True)
-    interval = st.sidebar.number_input("间隔(s)", min_value=1, max_value=60, value=3)
-    btn_refresh = st.sidebar.button("立即刷新")
-
-    if path and path != st.session_state["tail_path"]:
-        st.session_state["tail_path"] = path
-        st.session_state["tail_offset"] = 0
-        st.session_state["tail_df"] = pd.DataFrame()
-
-    if path:
-        if st.session_state["tail_df"].empty and os.path.exists(path):
-            text, new_off = read_file_tail(path, 0)
-            st.session_state["tail_df"] = parse_uploaded_text(text)
-            st.session_state["tail_offset"] = new_off
-        if (auto or btn_refresh) and os.path.exists(path):
-            new_text, new_off = read_file_tail(path, st.session_state["tail_offset"])
-            if new_off < st.session_state["tail_offset"]:
-                text, new_off2 = read_file_tail(path, 0)
-                st.session_state["tail_df"] = parse_uploaded_text(text)
-                st.session_state["tail_offset"] = new_off2
+    if multi_log:
+        uploaded_files = st.sidebar.file_uploader("选择日志文件（直接多选有bug，请一个一个按时间顺序上传）先xxx.log.1后xxx.log", type=["log", "txt", "1"], accept_multiple_files=True)
+        if uploaded_files:
+            dfs = []
+            for i, up in enumerate(uploaded_files):
+                text = up.read().decode('utf-8', errors='replace')
+                df_temp = parse_uploaded_text(text)
+                df_temp['log_source'] = f"文件{i+1}: {up.name}"
+                dfs.append(df_temp)
+            if dfs:
+                df = pd.concat(dfs, ignore_index=True)
             else:
-                if new_text:
-                    df_new = parse_uploaded_text(new_text)
-                    st.session_state["tail_df"] = pd.concat([st.session_state["tail_df"], df_new], ignore_index=True).drop_duplicates(subset=['time','raw'])
-                    st.session_state["tail_offset"] = new_off
+                df = pd.DataFrame()
+        else:
+            st.info("请在左侧上传日志文件。")
+            df = pd.DataFrame()
+    else:
+        up = st.sidebar.file_uploader("选择日志文件", type=["log", "txt", "1"])
+        if up is not None:
+            text = up.read().decode('utf-8', errors='replace')
+            df = parse_uploaded_text(text)
+            df['log_source'] = f"文件: {up.name}"
+        else:
+            st.info("请在左侧上传日志文件。")
+            df = pd.DataFrame()
+else:
+    if multi_log:
+        st.sidebar.subheader("多路径模式")
+        num_paths = st.sidebar.number_input("路径数量", min_value=1, max_value=5, value=1)
+        paths = []
+        for i in range(num_paths):
+            path = st.sidebar.text_input(f"本地日志路径 {i+1}", value=st.session_state.get(f"tail_path_{i}", ""), key=f"path_{i}")
+            if path:
+                paths.append(path)
+        
+        if paths:
+            auto = st.sidebar.toggle("自动刷新", value=True)
+            interval = st.sidebar.number_input("间隔(s)", min_value=1, max_value=60, value=3)
+            btn_refresh = st.sidebar.button("立即刷新")
+            
+            dfs = []
+            for i, path in enumerate(paths):
+                if path != st.session_state.get(f"tail_path_{i}", ""):
+                    st.session_state[f"tail_path_{i}"] = path
+                    st.session_state[f"tail_offset_{i}"] = 0
+                    st.session_state[f"tail_df_{i}"] = pd.DataFrame()
+                
+                if os.path.exists(path):
+                    if st.session_state[f"tail_df_{i}"].empty:
+                        text, new_off = read_file_tail(path, 0)
+                        st.session_state[f"tail_df_{i}"] = parse_uploaded_text(text)
+                        st.session_state[f"tail_offset_{i}"] = new_off
+                    
+                    if (auto or btn_refresh):
+                        new_text, new_off = read_file_tail(path, st.session_state[f"tail_offset_{i}"])
+                        if new_off < st.session_state[f"tail_offset_{i}"]:
+                            text, new_off2 = read_file_tail(path, 0)
+                            st.session_state[f"tail_df_{i}"] = parse_uploaded_text(text)
+                            st.session_state[f"tail_offset_{i}"] = new_off2
+                        else:
+                            if new_text:
+                                df_new = parse_uploaded_text(new_text)
+                                st.session_state[f"tail_df_{i}"] = pd.concat([st.session_state[f"tail_df_{i}"], df_new], ignore_index=True).drop_duplicates(subset=['time','raw'])
+                                st.session_state[f"tail_offset_{i}"] = new_off
+                    
+                    df_temp = st.session_state[f"tail_df_{i}"]
+                    if not df_temp.empty:
+                        df_temp['log_source'] = f"路径{i+1}: {os.path.basename(path)}"
+                        dfs.append(df_temp)
+            
+            if dfs:
+                df = pd.concat(dfs, ignore_index=True)
+            else:
+                df = pd.DataFrame()
+            
             if auto:
                 time.sleep(interval)
                 st.experimental_rerun()
-        df = st.session_state["tail_df"]
+        else:
+            st.info("请输入本地日志路径以启用实时追踪。")
+            df = pd.DataFrame()
     else:
-        st.info("请输入本地日志路径以启用实时追踪。")
+        path = st.sidebar.text_input("本地日志路径", value=st.session_state.get("tail_path", ""))
+        auto = st.sidebar.toggle("自动刷新", value=True)
+        interval = st.sidebar.number_input("间隔(s)", min_value=1, max_value=60, value=3)
+        btn_refresh = st.sidebar.button("立即刷新")
+
+        if path and path != st.session_state["tail_path"]:
+            st.session_state["tail_path"] = path
+            st.session_state["tail_offset"] = 0
+            st.session_state["tail_df"] = pd.DataFrame()
+
+        if path:
+            if st.session_state["tail_df"].empty and os.path.exists(path):
+                text, new_off = read_file_tail(path, 0)
+                st.session_state["tail_df"] = parse_uploaded_text(text)
+                st.session_state["tail_offset"] = new_off
+            if (auto or btn_refresh) and os.path.exists(path):
+                new_text, new_off = read_file_tail(path, st.session_state["tail_offset"])
+                if new_off < st.session_state["tail_offset"]:
+                    text, new_off2 = read_file_tail(path, 0)
+                    st.session_state["tail_df"] = parse_uploaded_text(text)
+                    st.session_state["tail_offset"] = new_off2
+                else:
+                    if new_text:
+                        df_new = parse_uploaded_text(new_text)
+                        st.session_state["tail_df"] = pd.concat([st.session_state["tail_df"], df_new], ignore_index=True).drop_duplicates(subset=['time','raw'])
+                        st.session_state["tail_offset"] = new_off
+                if auto:
+                    time.sleep(interval)
+                    st.experimental_rerun()
+            df = st.session_state["tail_df"]
+            if not df.empty:
+                df['log_source'] = f"路径: {os.path.basename(path)}"
+        else:
+            st.info("请输入本地日志路径以启用实时追踪。")
+            df = pd.DataFrame()
 
 if df is None or df.empty:
     st.stop()
@@ -430,6 +509,17 @@ sel_primary = st.sidebar.multiselect("一级分类", primaries, default=primarie
 sec_values = sorted([s for s in ev_all['secondary'].dropna().unique().tolist()])
 sel_secondary = st.sidebar.multiselect("二级分类", sec_values, default=[])
 regex = st.sidebar.text_input("说明正则筛选（可选）", value="")
+
+# --- Log source filter ---
+if 'log_source' in df.columns and df['log_source'].nunique() > 1:
+    st.sidebar.subheader("日志源筛选")
+    log_sources = df['log_source'].unique().tolist()
+    selected_sources = st.sidebar.multiselect("选择日志源", log_sources, default=log_sources)
+    if selected_sources:
+        df = df[df['log_source'].isin(selected_sources)]
+    else:
+        st.warning("请至少选择一个日志源")
+        st.stop()
 
 # --- Trajectory settings ---
 st.sidebar.subheader("轨迹设置")
@@ -526,18 +616,31 @@ if show_trajectory:
     else:
         st.warning(f"未找到{pose_mode}模式的pose数据")
 
-show_cols = ['time','event_code','msg_after_code']
+# 选择显示的列
+if 'log_source' in ev.columns and ev['log_source'].nunique() > 1:
+    show_cols = ['time','event_code','msg_after_code','log_source']
+else:
+    show_cols = ['time','event_code','msg_after_code']
+
 if not ev.empty:
     # 创建显示用的DataFrame，将时间格式化为毫秒精度
     display_ev = ev[show_cols].copy()
     display_ev['time'] = display_ev['time'].dt.strftime('%Y-%m-%d %H:%M:%S.%f').str[:-3]
     
-    # 配置列宽：让message列占据最大空间，前两列更紧凑
-    column_config = {
-        'time': st.column_config.TextColumn('时间', width=160),
-        'event_code': st.column_config.TextColumn('事件代码', width=200),
-        'msg_after_code': st.column_config.TextColumn('说明', width=2000)
-    }
+    # 配置列宽：让message列占据最大空间，前几列更紧凑
+    if 'log_source' in show_cols:
+        column_config = {
+            'time': st.column_config.TextColumn('时间', width=160),
+            'event_code': st.column_config.TextColumn('事件代码', width=200),
+            'msg_after_code': st.column_config.TextColumn('说明', width=1500),
+            'log_source': st.column_config.TextColumn('日志源', width=200)
+        }
+    else:
+        column_config = {
+            'time': st.column_config.TextColumn('时间', width=160),
+            'event_code': st.column_config.TextColumn('事件代码', width=200),
+            'msg_after_code': st.column_config.TextColumn('说明', width=2000)
+        }
     st.dataframe(display_ev, use_container_width=True, column_config=column_config)
 else:
     st.warning("未找到任何事件数据")
@@ -558,19 +661,34 @@ if not ev.empty:
 
     st.caption(f"区间日志行数：{len(slice_df)}")
 
-    log_cols = ['time','tag','file','func','message']
+    # 选择显示的列
+    if 'log_source' in slice_df.columns and slice_df['log_source'].nunique() > 1:
+        log_cols = ['time','tag','file','func','message','log_source']
+    else:
+        log_cols = ['time','tag','file','func','message']
+    
     # 创建显示用的DataFrame，将时间格式化为毫秒精度
     display_slice_df = slice_df[log_cols].copy()
     display_slice_df['time'] = display_slice_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S.%f').str[:-3]
     
     # 配置列宽：让message列占据最大空间，其他列更紧凑
-    column_config = {
-        'time': st.column_config.TextColumn('时间', width=160),
-        'tag': st.column_config.TextColumn('标签', width=80),
-        'file': st.column_config.TextColumn('文件', width=200),
-        'func': st.column_config.TextColumn('函数', width=160),
-        'message': st.column_config.TextColumn('消息', width=2000)
-    }
+    if 'log_source' in log_cols:
+        column_config = {
+            'time': st.column_config.TextColumn('时间', width=160),
+            'tag': st.column_config.TextColumn('标签', width=80),
+            'file': st.column_config.TextColumn('文件', width=200),
+            'func': st.column_config.TextColumn('函数', width=160),
+            'message': st.column_config.TextColumn('消息', width=1500),
+            'log_source': st.column_config.TextColumn('日志源', width=200)
+        }
+    else:
+        column_config = {
+            'time': st.column_config.TextColumn('时间', width=160),
+            'tag': st.column_config.TextColumn('标签', width=80),
+            'file': st.column_config.TextColumn('文件', width=200),
+            'func': st.column_config.TextColumn('函数', width=160),
+            'message': st.column_config.TextColumn('消息', width=2000)
+        }
     st.dataframe(display_slice_df, use_container_width=True, height=600, column_config=column_config)
 
     # Download log text
