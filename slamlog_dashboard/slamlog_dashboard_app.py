@@ -542,7 +542,7 @@ st.set_page_config(page_title="SLAM Log Dashboard", layout="wide")
 
 # --- Sidebar: data source selection ---
 st.sidebar.title("数据源")
-mode = st.sidebar.radio("选择模式", ["上传文件（离线）", "本地路径（实时追踪）"])
+mode = st.sidebar.radio("选择模式", ["上传文件（离线）"])
 multi_log = st.sidebar.checkbox("多日志模式", value=False, help="启用后可以同时处理多个日志文件")
 
 def ensure_time_dtype(df: pd.DataFrame) -> pd.DataFrame:
@@ -581,24 +581,6 @@ if "show_map_info" not in st.session_state:
 
 df = pd.DataFrame()
 
-# --- Map file upload and processing ---
-st.sidebar.subheader("地图文件")
-map_file = st.sidebar.file_uploader("上传地图文件", type=["yaml", "yml"], help="上传trajectory_state.yaml文件")
-
-# 显示地图信息按钮
-if "map_state" in st.session_state and st.session_state["map_state"] is not None:
-    if st.sidebar.button("显示地图信息", help="查看地图详细信息并上传轨迹路径"):
-        st.session_state["show_map_info"] = True
-
-# 处理地图文件
-if map_file is not None:
-    try:
-        map_content = map_file.read().decode('utf-8')
-        map_state = parse_trajectory_state(map_content)
-        st.session_state["map_state"] = map_state
-        st.sidebar.success(f"✅ 地图文件已加载，包含 {len(map_state.trajectories)} 个轨迹")
-    except Exception as e:
-        st.sidebar.error(f"❌ 地图文件解析失败: {str(e)}")
 
 # --- File modes ---
 if mode == "上传文件（离线）":
@@ -627,98 +609,25 @@ if mode == "上传文件（离线）":
         else:
             st.info("请在左侧上传日志文件。")
             df = pd.DataFrame()
-else:
-    if multi_log:
-        st.sidebar.subheader("多路径模式")
-        num_paths = st.sidebar.number_input("路径数量", min_value=1, max_value=5, value=1)
-        paths = []
-        for i in range(num_paths):
-            path = st.sidebar.text_input(f"本地日志路径 {i+1}", value=st.session_state.get(f"tail_path_{i}", ""), key=f"path_{i}")
-            if path:
-                paths.append(path)
-        
-        if paths:
-            auto = st.sidebar.toggle("自动刷新", value=True)
-            interval = st.sidebar.number_input("间隔(s)", min_value=1, max_value=60, value=3)
-            btn_refresh = st.sidebar.button("立即刷新")
-            
-            dfs = []
-            for i, path in enumerate(paths):
-                if path != st.session_state.get(f"tail_path_{i}", ""):
-                    st.session_state[f"tail_path_{i}"] = path
-                    st.session_state[f"tail_offset_{i}"] = 0
-                    st.session_state[f"tail_df_{i}"] = pd.DataFrame()
-                
-                if os.path.exists(path):
-                    if st.session_state[f"tail_df_{i}"].empty:
-                        text, new_off = read_file_tail(path, 0)
-                        st.session_state[f"tail_df_{i}"] = parse_uploaded_text(text)
-                        st.session_state[f"tail_offset_{i}"] = new_off
-                    
-                    if (auto or btn_refresh):
-                        new_text, new_off = read_file_tail(path, st.session_state[f"tail_offset_{i}"])
-                        if new_off < st.session_state[f"tail_offset_{i}"]:
-                            text, new_off2 = read_file_tail(path, 0)
-                            st.session_state[f"tail_df_{i}"] = parse_uploaded_text(text)
-                            st.session_state[f"tail_offset_{i}"] = new_off2
-                        else:
-                            if new_text:
-                                df_new = parse_uploaded_text(new_text)
-                                st.session_state[f"tail_df_{i}"] = pd.concat([st.session_state[f"tail_df_{i}"], df_new], ignore_index=True).drop_duplicates(subset=['time','raw'])
-                                st.session_state[f"tail_offset_{i}"] = new_off
-                    
-                    df_temp = st.session_state[f"tail_df_{i}"]
-                    if not df_temp.empty:
-                        df_temp['log_source'] = f"路径{i+1}: {os.path.basename(path)}"
-                        dfs.append(df_temp)
-            
-            if dfs:
-                df = pd.concat(dfs, ignore_index=True)
-            else:
-                df = pd.DataFrame()
-            
-            if auto:
-                time.sleep(interval)
-                st.rerun()
-        else:
-            st.info("请输入本地日志路径以启用实时追踪。")
-            df = pd.DataFrame()
-    else:
-        path = st.sidebar.text_input("本地日志路径", value=st.session_state.get("tail_path", ""))
-        auto = st.sidebar.toggle("自动刷新", value=True)
-        interval = st.sidebar.number_input("间隔(s)", min_value=1, max_value=60, value=3)
-        btn_refresh = st.sidebar.button("立即刷新")
 
-        if path and path != st.session_state["tail_path"]:
-            st.session_state["tail_path"] = path
-            st.session_state["tail_offset"] = 0
-            st.session_state["tail_df"] = pd.DataFrame()
+# --- Map file upload and processing ---
+st.sidebar.subheader("地图文件")
+map_file = st.sidebar.file_uploader("上传地图文件", type=["yaml", "yml"], help="上传trajectory_state.yaml文件")
 
-        if path:
-            if st.session_state["tail_df"].empty and os.path.exists(path):
-                text, new_off = read_file_tail(path, 0)
-                st.session_state["tail_df"] = parse_uploaded_text(text)
-                st.session_state["tail_offset"] = new_off
-            if (auto or btn_refresh) and os.path.exists(path):
-                new_text, new_off = read_file_tail(path, st.session_state["tail_offset"])
-                if new_off < st.session_state["tail_offset"]:
-                    text, new_off2 = read_file_tail(path, 0)
-                    st.session_state["tail_df"] = parse_uploaded_text(text)
-                    st.session_state["tail_offset"] = new_off2
-                else:
-                    if new_text:
-                        df_new = parse_uploaded_text(new_text)
-                        st.session_state["tail_df"] = pd.concat([st.session_state["tail_df"], df_new], ignore_index=True).drop_duplicates(subset=['time','raw'])
-                        st.session_state["tail_offset"] = new_off
-                if auto:
-                    time.sleep(interval)
-                    st.rerun()
-            df = st.session_state["tail_df"]
-            if not df.empty:
-                df['log_source'] = f"路径: {os.path.basename(path)}"
-        else:
-            st.info("请输入本地日志路径以启用实时追踪。")
-            df = pd.DataFrame()
+# 显示地图信息按钮
+if "map_state" in st.session_state and st.session_state["map_state"] is not None:
+    if st.sidebar.button("显示地图信息", help="查看地图详细信息并上传轨迹路径"):
+        st.session_state["show_map_info"] = True
+
+# 处理地图文件
+if map_file is not None:
+    try:
+        map_content = map_file.read().decode('utf-8')
+        map_state = parse_trajectory_state(map_content)
+        st.session_state["map_state"] = map_state
+        st.sidebar.success(f"✅ 地图文件已加载，包含 {len(map_state.trajectories)} 个轨迹")
+    except Exception as e:
+        st.sidebar.error(f"❌ 地图文件解析失败: {str(e)}")
 
 # --- Map info page ---
 if "show_map_info" in st.session_state and st.session_state["show_map_info"] and "map_state" in st.session_state and st.session_state["map_state"] is not None:
