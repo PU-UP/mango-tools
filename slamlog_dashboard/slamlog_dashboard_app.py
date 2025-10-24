@@ -12,10 +12,11 @@ import matplotlib.dates as mdates
 import io
 import os
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
+import yaml
 
 @dataclass
 class LogEntry:
@@ -31,6 +32,39 @@ class LogEntry:
     primary: Optional[str]
     secondary: Optional[str]
     raw: str
+
+
+@dataclass
+class TrajectoryInfo:
+    id: int
+    connected_ids: List[int]
+    trajectory_type: int
+    time: str
+    initial_size: int
+    sub_area: int
+    good_trajectory: bool
+
+
+@dataclass
+class PositionInfo:
+    position: Dict[str, float]
+    rotation: Dict[str, float]
+    timestamp: float
+    time: str
+    trajectory_id: int
+    save_timestamp: float
+    save_time: str
+
+
+@dataclass
+class MapState:
+    trajectory_index: int
+    trajectory_num: int
+    map_version: str
+    trajectory_source: str
+    base_position: PositionInfo
+    trajectories: Dict[str, TrajectoryInfo]
+    tag_position: PositionInfo
 
 
 TIMESTAMP_RE = re.compile(
@@ -341,6 +375,168 @@ def find_event_ids(ev_df: pd.DataFrame, code_like: str) -> list[int]:
     return m['eid'].tolist()
 
 
+def parse_trajectory_state(yaml_content: str) -> MapState:
+    """解析trajectory_state.yaml文件内容"""
+    try:
+        data = yaml.safe_load(yaml_content)
+        
+        # 解析base_position
+        base_pos_data = data.get('base_position', {})
+        base_position = PositionInfo(
+            position=base_pos_data.get('position', {}),
+            rotation=base_pos_data.get('rotation', {}),
+            timestamp=base_pos_data.get('timestamp', 0),
+            time=base_pos_data.get('time', ''),
+            trajectory_id=base_pos_data.get('trajectory_id', -1),
+            save_timestamp=base_pos_data.get('save_timestamp', 0),
+            save_time=base_pos_data.get('save_time', '')
+        )
+        
+        # 解析tag_position
+        tag_pos_data = data.get('tag_position', {})
+        tag_position = PositionInfo(
+            position=tag_pos_data.get('position', {}),
+            rotation=tag_pos_data.get('rotation', {}),
+            timestamp=tag_pos_data.get('timestamp', 0),
+            time=tag_pos_data.get('time', ''),
+            trajectory_id=tag_pos_data.get('trajectory_id', -1),
+            save_timestamp=tag_pos_data.get('save_timestamp', 0),
+            save_time=tag_pos_data.get('save_time', '')
+        )
+        
+        # 解析trajectories
+        trajectories = {}
+        for key, value in data.items():
+            if key.startswith('trajectory_') and isinstance(value, dict):
+                trajectory_info = TrajectoryInfo(
+                    id=value.get('id', 0),
+                    connected_ids=value.get('connected_ids', []),
+                    trajectory_type=value.get('trajectory_type', 0),
+                    time=value.get('time', ''),
+                    initial_size=value.get('initial_size', 0),
+                    sub_area=value.get('sub_area', -1),
+                    good_trajectory=value.get('good_trajectory', True)
+                )
+                trajectories[key] = trajectory_info
+        
+        return MapState(
+            trajectory_index=data.get('trajectory_index', 0),
+            trajectory_num=data.get('trajectory_num', 0),
+            map_version=data.get('map_version', ''),
+            trajectory_source=data.get('trajectory_source', ''),
+            base_position=base_position,
+            trajectories=trajectories,
+            tag_position=tag_position
+        )
+    except Exception as e:
+        st.error(f"解析trajectory_state.yaml文件失败: {str(e)}")
+        raise
+
+
+def parse_path_file(path_content: str) -> pd.DataFrame:
+    """解析路径文件内容，格式为 x y z"""
+    lines = path_content.strip().split('\n')
+    data = []
+    for i, line in enumerate(lines):
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            try:
+                x = float(parts[0])
+                y = float(parts[1])
+                yaw = float(parts[2]) if len(parts) > 2 else 0.0
+                time_str = f"{i//3600:02d}:{(i%3600)//60:02d}:{i%60:02d}"
+                data.append({
+                    'x': x,
+                    'y': y,
+                    'yaw': yaw,
+                    'time_str': time_str
+                })
+            except ValueError:
+                continue
+    return pd.DataFrame(data)
+
+
+def plot_map_trajectories(map_state: MapState, trajectory_paths: Dict[str, pd.DataFrame], 
+                         pose_mode: str = 'base') -> go.Figure:
+    """绘制地图轨迹"""
+    fig = go.Figure()
+    
+    colors = px.colors.qualitative.Set1
+    
+    # 绘制轨迹
+    for i, (traj_key, traj_info) in enumerate(map_state.trajectories.items()):
+        if traj_key in trajectory_paths and not trajectory_paths[traj_key].empty:
+            path_df = trajectory_paths[traj_key]
+            color = colors[i % len(colors)]
+            
+            fig.add_trace(go.Scatter(
+                x=path_df['x'],
+                y=path_df['y'],
+                mode='lines+markers',
+                name=f'轨迹{traj_info.id} (类型{traj_info.trajectory_type})',
+                line=dict(color=color, width=2),
+                marker=dict(size=4, color=color),
+                hovertemplate=(
+                    f"轨迹{traj_info.id}<br>"
+                    "时间: %{customdata[0]}<br>"
+                    "X: %{x:.3f}<br>"
+                    "Y: %{y:.3f}<br>"
+                    "Yaw: %{customdata[1]:.3f}<extra></extra>"
+                ),
+                customdata=path_df[['time_str', 'yaw']].values
+            ))
+    
+    # 如果是base模式，显示base和tag位置
+    if pose_mode == 'base':
+        # 显示base位置
+        if map_state.base_position.position:
+            fig.add_trace(go.Scatter(
+                x=[map_state.base_position.position.get('x', 0)],
+                y=[map_state.base_position.position.get('y', 0)],
+                mode='markers',
+                name='基站位置',
+                marker=dict(size=15, color='red', symbol='square'),
+                hovertemplate=(
+                    "基站位置<br>"
+                    f"X: {map_state.base_position.position.get('x', 0):.3f}<br>"
+                    f"Y: {map_state.base_position.position.get('y', 0):.3f}<br>"
+                    f"时间: {map_state.base_position.time}<extra></extra>"
+                )
+            ))
+        
+        # 显示tag位置
+        if map_state.tag_position.position:
+            fig.add_trace(go.Scatter(
+                x=[map_state.tag_position.position.get('x', 0)],
+                y=[map_state.tag_position.position.get('y', 0)],
+                mode='markers',
+                name='二维码位置',
+                marker=dict(size=15, color='orange', symbol='diamond'),
+                hovertemplate=(
+                    "二维码位置<br>"
+                    f"X: {map_state.tag_position.position.get('x', 0):.3f}<br>"
+                    f"Y: {map_state.tag_position.position.get('y', 0):.3f}<br>"
+                    f"时间: {map_state.tag_position.time}<extra></extra>"
+                )
+            ))
+    
+    fig.update_layout(
+        title=f"地图轨迹图 ({pose_mode.upper()}模式)",
+        xaxis_title='X坐标',
+        yaxis_title='Y坐标',
+        height=600,
+        showlegend=True,
+        hovermode='closest'
+    )
+    
+    # 设置等比例坐标轴
+    fig.update_layout(
+        yaxis=dict(scaleanchor="x", scaleratio=1)
+    )
+    
+    return fig
+
+
 
 st.set_page_config(page_title="SLAM Log Dashboard", layout="wide")
 
@@ -376,8 +572,33 @@ if "tail_offset" not in st.session_state:
     st.session_state["tail_offset"] = 0
 if "tail_path" not in st.session_state:
     st.session_state["tail_path"] = ""
+if "map_state" not in st.session_state:
+    st.session_state["map_state"] = None
+if "trajectory_paths" not in st.session_state:
+    st.session_state["trajectory_paths"] = {}
+if "show_map_info" not in st.session_state:
+    st.session_state["show_map_info"] = False
 
 df = pd.DataFrame()
+
+# --- Map file upload and processing ---
+st.sidebar.subheader("地图文件")
+map_file = st.sidebar.file_uploader("上传地图文件", type=["yaml", "yml"], help="上传trajectory_state.yaml文件")
+
+# 显示地图信息按钮
+if "map_state" in st.session_state and st.session_state["map_state"] is not None:
+    if st.sidebar.button("显示地图信息", help="查看地图详细信息并上传轨迹路径"):
+        st.session_state["show_map_info"] = True
+
+# 处理地图文件
+if map_file is not None:
+    try:
+        map_content = map_file.read().decode('utf-8')
+        map_state = parse_trajectory_state(map_content)
+        st.session_state["map_state"] = map_state
+        st.sidebar.success(f"✅ 地图文件已加载，包含 {len(map_state.trajectories)} 个轨迹")
+    except Exception as e:
+        st.sidebar.error(f"❌ 地图文件解析失败: {str(e)}")
 
 # --- File modes ---
 if mode == "上传文件（离线）":
@@ -458,7 +679,7 @@ else:
             
             if auto:
                 time.sleep(interval)
-                st.experimental_rerun()
+                st.rerun()
         else:
             st.info("请输入本地日志路径以启用实时追踪。")
             df = pd.DataFrame()
@@ -491,13 +712,113 @@ else:
                         st.session_state["tail_offset"] = new_off
                 if auto:
                     time.sleep(interval)
-                    st.experimental_rerun()
+                    st.rerun()
             df = st.session_state["tail_df"]
             if not df.empty:
                 df['log_source'] = f"路径: {os.path.basename(path)}"
         else:
             st.info("请输入本地日志路径以启用实时追踪。")
             df = pd.DataFrame()
+
+# --- Map info page ---
+if "show_map_info" in st.session_state and st.session_state["show_map_info"] and "map_state" in st.session_state and st.session_state["map_state"] is not None:
+    st.title("地图信息")
+    
+    map_state = st.session_state["map_state"]
+    
+    # 显示地图基本信息
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("轨迹数量", map_state.trajectory_num)
+    with col2:
+        st.metric("当前轨迹索引", map_state.trajectory_index)
+    with col3:
+        st.metric("地图版本", map_state.map_version)
+    with col4:
+        st.metric("轨迹源", map_state.trajectory_source)
+    
+    # 显示基站和二维码位置信息
+    st.subheader("位置信息")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**基站位置 (base坐标系)**")
+        if map_state.base_position.position:
+            st.write(f"- X: {map_state.base_position.position.get('x', 0):.6f}")
+            st.write(f"- Y: {map_state.base_position.position.get('y', 0):.6f}")
+            st.write(f"- Z: {map_state.base_position.position.get('z', 0):.6f}")
+            st.write(f"- 时间: {map_state.base_position.time}")
+        else:
+            st.write("无基站位置信息")
+    
+    with col2:
+        st.write("**二维码位置 (base坐标系)**")
+        if map_state.tag_position.position:
+            st.write(f"- X: {map_state.tag_position.position.get('x', 0):.6f}")
+            st.write(f"- Y: {map_state.tag_position.position.get('y', 0):.6f}")
+            st.write(f"- Z: {map_state.tag_position.position.get('z', 0):.6f}")
+            st.write(f"- 时间: {map_state.tag_position.time}")
+        else:
+            st.write("无二维码位置信息")
+    
+    # 显示轨迹信息
+    st.subheader("轨迹信息")
+    for traj_key, traj_info in map_state.trajectories.items():
+        with st.expander(f"轨迹 {traj_info.id} (类型 {traj_info.trajectory_type})"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write(f"**轨迹ID:** {traj_info.id}")
+                st.write(f"**轨迹类型:** {traj_info.trajectory_type}")
+                st.write(f"**初始大小:** {traj_info.initial_size}")
+            with col2:
+                st.write(f"**创建时间:** {traj_info.time}")
+                st.write(f"**子区域:** {traj_info.sub_area}")
+                st.write(f"**良好轨迹:** {'是' if traj_info.good_trajectory else '否'}")
+            with col3:
+                st.write(f"**连接轨迹:** {traj_info.connected_ids if traj_info.connected_ids else '无'}")
+            
+            # 轨迹路径上传
+            st.write("**上传轨迹路径:**")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                enu_path_file = st.file_uploader(
+                    f"ENU路径文件 - 轨迹{traj_info.id}", 
+                    type=["txt", "csv", "log"],
+                    key=f"enu_path_{traj_info.id}",
+                    help="上传ENU坐标系下的轨迹路径文件"
+                )
+                if enu_path_file is not None:
+                    try:
+                        content = enu_path_file.read().decode('utf-8')
+                        # 这里可以添加解析路径文件的逻辑
+                        st.session_state["trajectory_paths"][f"{traj_key}_enu"] = content
+                        st.success("ENU路径文件已上传")
+                    except Exception as e:
+                        st.error(f"ENU路径文件上传失败: {str(e)}")
+            
+            with col2:
+                base_path_file = st.file_uploader(
+                    f"Base路径文件 - 轨迹{traj_info.id}", 
+                    type=["txt", "csv", "log"],
+                    key=f"base_path_{traj_info.id}",
+                    help="上传Base坐标系下的轨迹路径文件"
+                )
+                if base_path_file is not None:
+                    try:
+                        content = base_path_file.read().decode('utf-8')
+                        # 这里可以添加解析路径文件的逻辑
+                        st.session_state["trajectory_paths"][f"{traj_key}_base"] = content
+                        st.success("Base路径文件已上传")
+                    except Exception as e:
+                        st.error(f"Base路径文件上传失败: {str(e)}")
+    
+    # 返回主页面按钮
+    if st.button("返回主页面"):
+        st.session_state["show_map_info"] = False
+        st.rerun()
+    
+    st.stop()
 
 if df is None or df.empty:
     st.stop()
@@ -525,6 +846,7 @@ if 'log_source' in df.columns and df['log_source'].nunique() > 1:
 st.sidebar.subheader("轨迹设置")
 pose_mode = st.sidebar.radio("位置模式", ["enu", "base"], index=0)
 show_trajectory = st.sidebar.checkbox("显示轨迹", value=False)
+show_map = st.sidebar.checkbox("显示地图", value=False, help="显示地图轨迹（需要先上传地图文件）")
 
 ev = ev_all.copy()
 if sel_primary:
@@ -582,39 +904,219 @@ if not ev.empty:
     )
     ev = ev[(ev['time'] >= start_time) & (ev['time'] <= end_time)]
 
-# --- Trajectory display ---
-if show_trajectory:
+# --- Trajectory and Map display ---
+if show_trajectory or show_map:
     st.subheader("轨迹图")
     
-    # 提取pose数据
-    poses_df = extract_pose_from_log(df, pose_mode)
+    # 创建组合图表
+    fig = go.Figure()
     
-    if not poses_df.empty:
-        # 根据滑块选择的时间范围过滤pose数据
-        poses_filtered = poses_df[(poses_df['time'] >= start_time) & (poses_df['time'] <= end_time)]
+    # 显示轨迹数据
+    if show_trajectory:
+        poses_df = extract_pose_from_log(df, pose_mode)
         
-        if not poses_filtered.empty:
-            # 显示轨迹统计信息
+        if not poses_df.empty:
+            # 根据滑块选择的时间范围过滤pose数据
+            poses_filtered = poses_df[(poses_df['time'] >= start_time) & (poses_df['time'] <= end_time)]
+            
+            if not poses_filtered.empty:
+                # 绘制轨迹线
+                fig.add_trace(go.Scatter(
+                    x=poses_filtered['x'],
+                    y=poses_filtered['y'],
+                    mode='lines+markers',
+                    name='实时轨迹',
+                    line=dict(color='blue', width=2),
+                    marker=dict(size=4, color='blue'),
+                    hovertemplate=(
+                        "时间: %{customdata[0]}<br>"
+                        "X: %{x:.3f}<br>"
+                        "Y: %{y:.3f}<br>"
+                        "Yaw: %{customdata[1]:.3f}<br>"
+                        "Conf: %{customdata[2]}<br>"
+                        "Cal: %{customdata[3]}<br>"
+                        "Slip: %{customdata[4]}<br>"
+                        "Reloc: %{customdata[5]}<extra></extra>"
+                    ),
+                    customdata=poses_filtered[['time_str', 'yaw', 'conf', 'cal', 'slip', 'reloc']].values
+                ))
+                
+                # 添加起始点
+                fig.add_trace(go.Scatter(
+                    x=[poses_filtered.iloc[0]['x']],
+                    y=[poses_filtered.iloc[0]['y']],
+                    mode='markers',
+                    name='轨迹起点',
+                    marker=dict(size=10, color='green', symbol='circle'),
+                    hovertemplate="轨迹起点<br>X: %{x:.3f}<br>Y: %{y:.3f}<extra></extra>"
+                ))
+                
+                # 添加终点
+                fig.add_trace(go.Scatter(
+                    x=[poses_filtered.iloc[-1]['x']],
+                    y=[poses_filtered.iloc[-1]['y']],
+                    mode='markers',
+                    name='轨迹终点',
+                    marker=dict(size=10, color='red', symbol='circle'),
+                    hovertemplate="轨迹终点<br>X: %{x:.3f}<br>Y: %{y:.3f}<extra></extra>"
+                ))
+    
+    # 显示地图轨迹
+    if show_map and "map_state" in st.session_state and st.session_state["map_state"] is not None:
+        map_state = st.session_state["map_state"]
+        
+        # 检查是否有轨迹路径数据
+        trajectory_paths = {}
+        has_path_data = False
+        
+        for traj_key, traj_info in map_state.trajectories.items():
+            enu_key = f"{traj_key}_enu"
+            base_key = f"{traj_key}_base"
+            
+            if pose_mode == 'enu' and "trajectory_paths" in st.session_state and enu_key in st.session_state["trajectory_paths"]:
+                try:
+                    path_content = st.session_state["trajectory_paths"][enu_key]
+                    trajectory_paths[traj_key] = parse_path_file(path_content)
+                    has_path_data = True
+                except Exception as e:
+                    st.warning(f"解析轨迹{traj_info.id}的ENU路径数据失败: {str(e)}")
+            
+            elif pose_mode == 'base' and "trajectory_paths" in st.session_state and base_key in st.session_state["trajectory_paths"]:
+                try:
+                    path_content = st.session_state["trajectory_paths"][base_key]
+                    trajectory_paths[traj_key] = parse_path_file(path_content)
+                    has_path_data = True
+                except Exception as e:
+                    st.warning(f"解析轨迹{traj_info.id}的Base路径数据失败: {str(e)}")
+        
+        if has_path_data:
+            colors = px.colors.qualitative.Set1
+            
+            # 绘制地图轨迹
+            for i, (traj_key, traj_info) in enumerate(map_state.trajectories.items()):
+                if traj_key in trajectory_paths and not trajectory_paths[traj_key].empty:
+                    path_df = trajectory_paths[traj_key]
+                    color = colors[i % len(colors)]
+                    
+                    fig.add_trace(go.Scatter(
+                        x=path_df['x'],
+                        y=path_df['y'],
+                        mode='lines+markers',
+                        name=f'地图轨迹{traj_info.id}',
+                        line=dict(color=color, width=2),
+                        marker=dict(size=3, color=color),
+                        hovertemplate=(
+                            f"地图轨迹{traj_info.id}<br>"
+                            "时间: %{customdata[0]}<br>"
+                            "X: %{x:.3f}<br>"
+                            "Y: %{y:.3f}<br>"
+                            "Yaw: %{customdata[1]:.3f}<extra></extra>"
+                        ),
+                        customdata=path_df[['time_str', 'yaw']].values
+                    ))
+            
+            # 如果是base模式，显示base和tag位置
+            if pose_mode == 'base':
+                # 显示base位置
+                if map_state.base_position.position:
+                    fig.add_trace(go.Scatter(
+                        x=[map_state.base_position.position.get('x', 0)],
+                        y=[map_state.base_position.position.get('y', 0)],
+                        mode='markers',
+                        name='基站位置',
+                        marker=dict(size=15, color='red', symbol='square'),
+                        hovertemplate=(
+                            "基站位置<br>"
+                            f"X: {map_state.base_position.position.get('x', 0):.3f}<br>"
+                            f"Y: {map_state.base_position.position.get('y', 0):.3f}<br>"
+                            f"时间: {map_state.base_position.time}<extra></extra>"
+                        )
+                    ))
+                
+                # 显示tag位置
+                if map_state.tag_position.position:
+                    fig.add_trace(go.Scatter(
+                        x=[map_state.tag_position.position.get('x', 0)],
+                        y=[map_state.tag_position.position.get('y', 0)],
+                        mode='markers',
+                        name='二维码位置',
+                        marker=dict(size=15, color='orange', symbol='diamond'),
+                        hovertemplate=(
+                            "二维码位置<br>"
+                            f"X: {map_state.tag_position.position.get('x', 0):.3f}<br>"
+                            f"Y: {map_state.tag_position.position.get('y', 0):.3f}<br>"
+                            f"时间: {map_state.tag_position.time}<extra></extra>"
+                        )
+                    ))
+    
+    # 设置图表布局
+    fig.update_layout(
+        title=f"轨迹图 ({pose_mode.upper()}模式)",
+        xaxis_title='X坐标',
+        yaxis_title='Y坐标',
+        height=600,
+        showlegend=True,
+        hovermode='closest'
+    )
+    
+    # 设置等比例坐标轴
+    fig.update_layout(
+        yaxis=dict(scaleanchor="x", scaleratio=1)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # 显示统计信息
+    if show_trajectory:
+        poses_df = extract_pose_from_log(df, pose_mode)
+        if not poses_df.empty:
+            poses_filtered = poses_df[(poses_df['time'] >= start_time) & (poses_df['time'] <= end_time)]
+            if not poses_filtered.empty:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("实时轨迹点数", len(poses_filtered))
+                with col2:
+                    st.metric("时间范围", f"{poses_filtered['time'].min().strftime('%H:%M:%S.%f')[:-3]} - {poses_filtered['time'].max().strftime('%H:%M:%S.%f')[:-3]}")
+                with col3:
+                    distance = ((poses_filtered['x'].diff() ** 2 + poses_filtered['y'].diff() ** 2) ** 0.5).sum()
+                    st.metric("总距离", f"{distance:.2f}m")
+                
+                # 显示pose数据表格
+                with st.expander("查看pose数据"):
+                    st.dataframe(poses_filtered[['time_str', 'x', 'y', 'yaw', 'conf', 'cal', 'slip', 'reloc']], use_container_width=True)
+    
+    if show_map and "map_state" in st.session_state and st.session_state["map_state"] is not None:
+        map_state = st.session_state["map_state"]
+        trajectory_paths = {}
+        
+        for traj_key, traj_info in map_state.trajectories.items():
+            enu_key = f"{traj_key}_enu"
+            base_key = f"{traj_key}_base"
+            
+            if pose_mode == 'enu' and "trajectory_paths" in st.session_state and enu_key in st.session_state["trajectory_paths"]:
+                try:
+                    path_content = st.session_state["trajectory_paths"][enu_key]
+                    trajectory_paths[traj_key] = parse_path_file(path_content)
+                except Exception:
+                    pass
+            
+            elif pose_mode == 'base' and "trajectory_paths" in st.session_state and base_key in st.session_state["trajectory_paths"]:
+                try:
+                    path_content = st.session_state["trajectory_paths"][base_key]
+                    trajectory_paths[traj_key] = parse_path_file(path_content)
+                except Exception:
+                    pass
+        
+        if trajectory_paths:
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("轨迹点数", len(poses_filtered))
+                st.metric("地图轨迹数量", len(trajectory_paths))
             with col2:
-                st.metric("时间范围", f"{poses_filtered['time'].min().strftime('%H:%M:%S.%f')[:-3]} - {poses_filtered['time'].max().strftime('%H:%M:%S.%f')[:-3]}")
+                st.metric("坐标系", pose_mode.upper())
             with col3:
-                distance = ((poses_filtered['x'].diff() ** 2 + poses_filtered['y'].diff() ** 2) ** 0.5).sum()
-                st.metric("总距离", f"{distance:.2f}m")
-            
-            # 绘制轨迹图
-            fig = plot_trajectory(poses_filtered, f"轨迹图 ({pose_mode.upper()}模式)")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # 显示pose数据表格
-            with st.expander("查看pose数据"):
-                st.dataframe(poses_filtered[['time_str', 'x', 'y', 'yaw', 'conf', 'cal', 'slip', 'reloc']], use_container_width=True)
-        else:
-            st.warning(f"在选定时间范围内未找到{pose_mode}模式的pose数据")
-    else:
-        st.warning(f"未找到{pose_mode}模式的pose数据")
+                total_points = sum(len(df) for df in trajectory_paths.values())
+                st.metric("地图轨迹点数", total_points)
+
 
 # 选择显示的列
 if 'log_source' in ev.columns and ev['log_source'].nunique() > 1:
