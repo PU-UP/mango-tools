@@ -32,6 +32,50 @@ def get_local_ip() -> str:
             pass
     return ip
 
+def get_all_ips() -> list:
+    """获取所有可用的 IP 地址列表（包括本机 IP 和回环地址）。"""
+    ips = set()
+    
+    # 添加回环地址
+    ips.add("127.0.0.1")
+    
+    # 获取本机局域网 IP
+    try:
+        local_ip = get_local_ip()
+        if local_ip:
+            ips.add(local_ip)
+    except Exception:
+        pass
+    
+    # 尝试获取主机名对应的所有 IP
+    try:
+        hostname = socket.gethostname()
+        # 获取主机名对应的 IP 列表
+        addrinfo_list = socket.getaddrinfo(hostname, None, socket.AF_INET)
+        for addr_info in addrinfo_list:
+            ip = addr_info[4][0]
+            if ip and ip != "0.0.0.0":
+                ips.add(ip)
+    except Exception:
+        pass
+    
+    # Linux/Mac: 尝试通过 hostname -I 获取所有接口 IP
+    try:
+        import platform
+        if platform.system() != "Windows":
+            import subprocess
+            result = subprocess.run(['hostname', '-I'], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                for ip in result.stdout.strip().split():
+                    if ip and ip != "0.0.0.0":
+                        ips.add(ip)
+    except Exception:
+        pass
+    
+    # 转换为列表并排序（127.0.0.1 在前，其他按字符串排序）
+    ip_list = sorted(ips, key=lambda x: (x != "127.0.0.1", x))
+    return ip_list if ip_list else ["127.0.0.1"]
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # ===================== 基础 HTTP & 解析 =====================
@@ -220,7 +264,8 @@ class App(tk.Tk):
         self.minsize(760, 420)
 
         # 默认值：服务器地址取本机 IP；保存到脚本所在目录
-        default_ip = get_local_ip()
+        self.available_ips = get_all_ips()
+        default_ip = self.available_ips[0] if self.available_ips else get_local_ip()
         self.current_url = tk.StringVar(value=f"http://{default_ip}:8000/")
         self.save_dir = tk.StringVar(value=str(SCRIPT_DIR))
         self.upload_subdir = tk.StringVar(value="")
@@ -237,8 +282,13 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=(10,8,10,4))
         top.pack(fill=tk.X)
         ttk.Label(top, text="服务器：").grid(row=0, column=0, sticky="w")
-        ent = ttk.Entry(top, textvariable=self.current_url)
-        ent.grid(row=0, column=1, sticky="we", padx=6)
+        
+        # 创建 IP 选项列表（格式：http://IP:8000/）
+        ip_options = [f"http://{ip}:8000/" for ip in self.available_ips]
+        # 使用可编辑的下拉框，既可以从列表选择，也可以手动输入
+        self.url_combo = ttk.Combobox(top, textvariable=self.current_url, values=ip_options, width=40)
+        self.url_combo.grid(row=0, column=1, sticky="we", padx=6)
+        
         ttk.Button(top, text="连接/刷新", command=self.connect).grid(row=0, column=2, padx=4)
         ttk.Button(top, text="后退", command=self.go_back).grid(row=0, column=3)
         top.grid_columnconfigure(1, weight=1)

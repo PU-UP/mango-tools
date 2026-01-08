@@ -1,4 +1,4 @@
-import argparse, io, os, sys, json, time, urllib.parse
+import argparse, io, os, sys, json, time, urllib.parse, socket
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 from pathlib import Path
@@ -116,6 +116,18 @@ class UploadHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+def get_local_ip():
+    """获取本机IP地址"""
+    try:
+        # 连接到一个远程地址来获取本机IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("port", type=int, nargs="?", default=8000)
@@ -123,6 +135,9 @@ if __name__ == "__main__":
     args = ap.parse_args()
     if args.directory:
         os.chdir(args.directory)
+    local_ip = get_local_ip()
     with ThreadingHTTPServer(("0.0.0.0", args.port), UploadHandler) as httpd:
+        print(f"Current IP: {local_ip}")
         print(f"Serving (upload+list) on 0.0.0.0:{args.port} dir={os.getcwd()}")
+        print(f"Access via: http://{local_ip}:{args.port}")
         httpd.serve_forever()
