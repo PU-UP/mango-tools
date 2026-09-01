@@ -1,7 +1,7 @@
 # client.py
 # 一体化 HTTP 客户端（上传 + 下载）
 # 适配 python -m http.server（只读：仅下载）与 http_upload_server.py（可上传）
-# 纯标准库、跨平台。界面更紧凑；默认服务器地址取本机局域网 IP；默认保存到 downloads 文件夹。
+# 纯标准库、跨平台。界面更紧凑；默认服务器地址取本机局域网 IP；默认保存路径为脚本所在文件夹。
 
 import threading
 import urllib.request
@@ -16,8 +16,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import ipaddress
 import struct
-import os
-import tempfile
 
 # ===================== 实用函数 =====================
 
@@ -42,7 +40,7 @@ def get_network_info():
         local_ip = get_local_ip()
         if not local_ip or local_ip == "127.0.0.1":
             return None, None
-
+        
         # 获取子网掩码
         import platform
         if platform.system() == "Windows":
@@ -53,8 +51,8 @@ def get_network_info():
                 for i, line in enumerate(lines):
                     # 查找包含 IPv4 地址的行
                     if 'IPv4' in line or 'IP Address' in line:
-                        # IP 地址与 IPv4 标签在同一行
-                        if line.split(':', 1)[-1].strip().split('(')[0].strip() == local_ip:
+                        # 检查下一行是否包含我们的 IP
+                        if i + 1 < len(lines) and local_ip in lines[i + 1]:
                             # 继续查找子网掩码
                             for j in range(i + 1, min(i + 10, len(lines))):
                                 line_lower = lines[j].lower()
@@ -67,7 +65,7 @@ def get_network_info():
                                             # 转换为 CIDR 格式
                                             mask_parts = mask_str.split('.')
                                             if len(mask_parts) == 4:
-                                                mask_int = ipaddress.IPv4Network(f"0.0.0.0/{mask_str}").prefixlen
+                                                mask_int = sum(bin(int(x)).count('1') for x in mask_parts)
                                                 return local_ip, f"/{mask_int}"
                                         except:
                                             pass
@@ -85,11 +83,11 @@ def get_network_info():
                         if local_ip in line and '/' in line:
                             parts = line.split()
                             for part in parts:
-                                if part.startswith(local_ip + '/'):
-                                    return local_ip, '/' + part.split('/')[1]
+                                if '/' in part and local_ip.split('.')[0] in part:
+                                    return local_ip, part.split('/')[1]
             except:
                 pass
-
+            
             # 回退到 ifconfig
             try:
                 result = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=5)
@@ -101,14 +99,14 @@ def get_network_info():
                                 if 'netmask' in part.lower() and i+1 < len(parts):
                                     mask_hex = parts[i+1]
                                     try:
-                                        mask = str(ipaddress.IPv4Address(int(mask_hex, 16))) if mask_hex.lower().startswith('0x') else mask_hex
-                                        mask_bin = ipaddress.IPv4Network(f'0.0.0.0/{mask}').prefixlen
+                                        mask_int = int(mask_hex, 16)
+                                        mask_bin = bin(mask_int).count('1')
                                         return local_ip, f"/{mask_bin}"
                                     except:
                                         pass
             except:
                 pass
-
+        
         # 如果无法获取子网掩码，假设是 /24（255.255.255.0）
         return local_ip, "/24"
     except Exception:
@@ -128,54 +126,64 @@ def check_http_service(ip, port=8000, timeout=0.5):
 def scan_network_ips(local_ip, subnet_mask, port=8000, max_threads=50):
     """扫描同网段内运行 HTTP 服务的 IP 地址。"""
     found_ips = set()
-
+    
     try:
-        mask = str(subnet_mask).lstrip('/')
-        network = ipaddress.IPv4Network(f"{local_ip}/{mask}", strict=False)
-        # ponytail: 大网段仅扫描本机所在 /24，其他地址可手动连接。
-        if network.prefixlen < 24:
-            network = ipaddress.IPv4Network(f"{local_ip}/24", strict=False)
-        max_threads = max(1, max_threads)
-
+        # 构建网络对象
+        if '/' in str(subnet_mask):
+            network_str = f"{local_ip}{subnet_mask}"
+        else:
+            # 如果是点分十进制格式，转换为 CIDR
+            try:
+                mask_int = sum(bin(int(x)).count('1') for x in subnet_mask.split('.'))
+                network_str = f"{local_ip}/{mask_int}"
+            except:
+                network_str = f"{local_ip}/24"
+        
+        network = ipaddress.IPv4Network(network_str, strict=False)
+        
+        # 扫描网段内的 IP
+        ip_list = list(network.hosts())
+        
         def scan_ip(ip_str):
             # 跳过本机 IP
             if ip_str != local_ip and check_http_service(ip_str, port):
                 found_ips.add(ip_str)
-
+        
         # 使用线程池扫描
         threads = []
         # 限制扫描范围，避免扫描时间过长
-        for ip in network.hosts():
+        max_scan = min(254, len(ip_list))
+        for ip in ip_list[:max_scan]:
             while len(threads) >= max_threads:
                 threads = [t for t in threads if t.is_alive()]
                 if len(threads) >= max_threads:
                     import time
                     time.sleep(0.1)
-
+            
             t = threading.Thread(target=scan_ip, args=(str(ip),), daemon=True)
             t.start()
             threads.append(t)
-
+        
         # 等待所有线程完成
         for t in threads:
             t.join(timeout=2)
-
+            
     except Exception as e:
         pass
-
+    
     return found_ips
 
 def get_all_ips(scan_network=False) -> list:
     """获取所有可用的 IP 地址列表（包括本机 IP 和回环地址）。
-
+    
     Args:
         scan_network: 是否扫描同网段的其他 IP（可能较慢）
     """
     ips = set()
-
+    
     # 添加回环地址
     ips.add("127.0.0.1")
-
+    
     # 获取本机局域网 IP
     try:
         local_ip = get_local_ip()
@@ -183,7 +191,7 @@ def get_all_ips(scan_network=False) -> list:
             ips.add(local_ip)
     except Exception:
         pass
-
+    
     # 尝试获取主机名对应的所有 IP
     try:
         hostname = socket.gethostname()
@@ -195,7 +203,7 @@ def get_all_ips(scan_network=False) -> list:
                 ips.add(ip)
     except Exception:
         pass
-
+    
     # Linux/Mac: 尝试通过 hostname -I 获取所有接口 IP
     try:
         import platform
@@ -208,7 +216,7 @@ def get_all_ips(scan_network=False) -> list:
                         ips.add(ip)
     except Exception:
         pass
-
+    
     # 扫描同网段的其他 IP（如果启用）
     if scan_network:
         try:
@@ -218,13 +226,12 @@ def get_all_ips(scan_network=False) -> list:
                 ips.update(network_ips)
         except Exception:
             pass
-
+    
     # 转换为列表并排序（127.0.0.1 在前，其他按字符串排序）
     ip_list = sorted(ips, key=lambda x: (x != "127.0.0.1", x))
     return ip_list if ip_list else ["127.0.0.1"]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DOWNLOAD_DIR = SCRIPT_DIR / "downloads"
 
 # ===================== 基础 HTTP & 解析 =====================
 
@@ -330,7 +337,11 @@ def crawl_tree(base_url):
     """递归抓取目录下所有文件 URL 列表"""
     result = []
     def _walk(url):
-        entries = list_dir(url)
+        try:
+            entries = list_dir(url)
+        except Exception:
+            result.append(url)
+            return
         for _name, href, is_dir in entries:
             if is_dir:
                 _walk(href)
@@ -339,70 +350,42 @@ def crawl_tree(base_url):
     _walk(base_url)
     return result
 
-def to_local_path(url, dest_root):
-    """将远端路径限制在指定下载目录内，包括解码后的路径和符号链接。"""
-    root = Path(dest_root).resolve()
-    path = urllib.parse.unquote(urllib.parse.urlsplit(url).path.lstrip('/'))
-    if not path or any(c in path for c in ('\\', ':', '\x00')) or '..' in path.split('/'):
-        raise ValueError("不安全的下载路径")
-    target = (root / path).resolve()
-    target.relative_to(root)
-    if target == root:
-        raise ValueError("下载地址未指定文件")
-    return target
-
-
 def download_file(url, dest_path, progress_cb=None, timeout=30, chunk_size=128*1024):
-    dest_path = Path(dest_path)
     req = urllib.request.Request(url, headers={"User-Agent": "HTTP-Client/1.0"})
-    temp_path = None
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            total = resp.getheader("Content-Length")
-            total = int(total) if total and total.isdigit() else None
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            read_bytes = 0
-            with tempfile.NamedTemporaryFile(dir=dest_path.parent, prefix='.download-', delete=False) as f:
-                temp_path = Path(f.name)
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    read_bytes += len(chunk)
-                    if progress_cb:
-                        progress_cb(read_bytes, total)
-            if total is not None and read_bytes != total:
-                raise IOError(f"下载不完整：预期 {total} 字节，收到 {read_bytes} 字节")
-        os.replace(temp_path, dest_path)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        total = resp.getheader("Content-Length")
+        total = int(total) if total and total.isdigit() else None
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        read_bytes = 0
+        with open(dest_path, "wb") as f:
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                read_bytes += len(chunk)
+                if progress_cb:
+                    progress_cb(read_bytes, total)
 
 def multipart_post(url, files, timeout=30, subpath=""):
     """上传本地文件列表到 url(+subpath)，使用 multipart/form-data"""
     if not url.endswith("/"):
         url += "/"
     if subpath:
-        url += urllib.parse.quote(subpath.strip("/"), safe="/") + "/"
+        url += subpath.strip("/") + "/"
 
     boundary = uuid.uuid4().hex
     CRLF = "\r\n"
     body = []
 
-    if not files:
-        raise ValueError("没有可上传的文件")
     for p in files:
         p = Path(p)
         if not p.is_file():
-            raise FileNotFoundError(f"上传文件不存在：{p}")
-        if "\r" in p.name or "\n" in p.name:
-            raise ValueError("文件名不能包含换行")
-        filename = p.name.replace('\\', '\\\\').replace('"', '\\"')
+            continue
         mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
         body.append(f"--{boundary}{CRLF}".encode())
         head = (
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"{CRLF}'
+            f'Content-Disposition: form-data; name="file"; filename="{p.name}"{CRLF}'
             f"Content-Type: {mime}{CRLF}{CRLF}"
         ).encode()
         body.append(head)
@@ -435,12 +418,12 @@ class App(tk.Tk):
         self.geometry("880x520")
         self.minsize(760, 420)
 
-        # 默认值：服务器地址取本机 IP；保存到专用下载目录
+        # 默认值：服务器地址取本机 IP；保存到脚本所在目录
         self.available_ips = get_all_ips(scan_network=False)  # 初始不扫描，避免启动慢
         self.initial_ip_count = len(self.available_ips)  # 保存初始 IP 数量
         default_ip = self.available_ips[0] if self.available_ips else get_local_ip()
         self.current_url = tk.StringVar(value=f"http://{default_ip}:8000/")
-        self.save_dir = tk.StringVar(value=str(DOWNLOAD_DIR))
+        self.save_dir = tk.StringVar(value=str(SCRIPT_DIR))
         self.upload_subdir = tk.StringVar(value="")
         self.upload_to_current = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="就绪")
@@ -456,13 +439,13 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=(10,8,10,4))
         top.pack(fill=tk.X)
         ttk.Label(top, text="服务器：").grid(row=0, column=0, sticky="w")
-
+        
         # 创建 IP 选项列表（格式：http://IP:8000/）
         ip_options = [f"http://{ip}:8000/" for ip in self.available_ips]
         # 使用可编辑的下拉框，既可以从列表选择，也可以手动输入
         self.url_combo = ttk.Combobox(top, textvariable=self.current_url, values=ip_options, width=40)
         self.url_combo.grid(row=0, column=1, sticky="we", padx=6)
-
+        
         ttk.Button(top, text="扫描网络", command=self.scan_network).grid(row=0, column=2, padx=4)
         ttk.Button(top, text="连接/刷新", command=self.connect).grid(row=0, column=3, padx=4)
         ttk.Button(top, text="后退", command=self.go_back).grid(row=0, column=4)
@@ -544,15 +527,15 @@ class App(tk.Tk):
         if self.scanning:
             messagebox.showinfo("提示", "正在扫描中，请稍候...")
             return
-
+        
         self.scanning = True
-        self.status.set("正在扫描本机附近 IP（最多254个）...")
-
+        self.status.set("正在扫描同网段 IP...")
+        
         def worker():
             try:
                 # 扫描网络
                 new_ips = get_all_ips(scan_network=True)
-
+                
                 # 更新 IP 列表
                 def update_ui():
                     self.available_ips = new_ips
@@ -564,14 +547,14 @@ class App(tk.Tk):
                     else:
                         self.status.set("扫描完成，未找到其他服务器")
                     self.scanning = False
-
+                
                 self.after(0, update_ui)
             except Exception as e:
-                def update_ui(error=str(e)):
-                    self.status.set(f"扫描失败：{error}")
+                def update_ui():
+                    self.status.set(f"扫描失败：{e}")
                     self.scanning = False
                 self.after(0, update_ui)
-
+        
         threading.Thread(target=worker, daemon=True).start()
 
     def connect(self):
@@ -630,7 +613,7 @@ class App(tk.Tk):
                 self._download_urls([url])
 
     def choose_save_dir(self):
-        d = filedialog.askdirectory(initialdir=self.save_dir.get() or str(DOWNLOAD_DIR))
+        d = filedialog.askdirectory(initialdir=self.save_dir.get() or str(SCRIPT_DIR))
         if d:
             self.save_dir.set(d)
 
@@ -657,13 +640,10 @@ class App(tk.Tk):
                 for base_url in folder_urls:
                     url_list.extend(crawl_tree(base_url))
             except Exception as e:
-                self._set_busy(False)
                 self._error(f"扫描失败：{e}")
-                return
-            if url_list:
-                self.after(0, lambda: self._download_urls(url_list))
-            else:
-                self._set_busy(False, "目录中没有可下载的文件")
+            finally:
+                if url_list:
+                    self._download_urls(url_list)
 
         if folder_urls:
             if not messagebox.askyesno("确认", f"将递归下载 {len(folder_urls)} 个文件夹中的所有文件，确认继续？"):
@@ -694,13 +674,10 @@ class App(tk.Tk):
                 for base_url in folder_urls:
                     url_list.extend(crawl_tree(base_url))
             except Exception as e:
-                self._set_busy(False)
                 self._error(f"扫描失败：{e}")
-                return
-            if url_list:
-                self.after(0, lambda: self._download_urls(url_list))
-            else:
-                self._set_busy(False, "目录中没有可下载的文件")
+            finally:
+                if url_list:
+                    self._download_urls(url_list)
 
         if folder_urls:
             if not messagebox.askyesno("确认", f"将递归下载当前目录下所有内容（包含 {len(folder_urls)} 个文件夹），继续？"):
@@ -712,13 +689,8 @@ class App(tk.Tk):
                 self._download_urls(url_list)
 
     def _download_urls(self, urls):
-        try:
-            dest_root = Path(self.save_dir.get() or DOWNLOAD_DIR).resolve()
-            dest_root.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            self._set_busy(False)
-            self._error(f"无法创建保存目录：{e}")
-            return
+        dest_root = Path(self.save_dir.get() or SCRIPT_DIR)
+        dest_root.mkdir(parents=True, exist_ok=True)
         total = len(urls)
         if total == 0:
             return
@@ -726,18 +698,26 @@ class App(tk.Tk):
         self.progress["maximum"] = total
         self._set_busy(True, f"准备下载 {total} 个文件…")
 
+        def to_local_path(url):
+            try:
+                u = urllib.parse.urlparse(url)
+                path = urllib.parse.unquote(u.path.lstrip("/"))
+                return dest_root / path
+            except Exception:
+                return dest_root / Path(url.split("/")[-1])
+
         def worker():
             ok = 0
             fail = 0
             for idx, url in enumerate(urls, 1):
                 try:
-                    dst = to_local_path(url, dest_root)
+                    dst = to_local_path(url)
                     def per_prog(rb, tb):
                         if tb:
                             pct = int(rb*100/max(1,tb))
-                            self._log(f"下载中（{idx}/{total}）：{dst.name}  {pct}%")
+                            self.status.set(f"下载中（{idx}/{total}）：{dst.name}  {pct}%")
                         else:
-                            self._log(f"下载中（{idx}/{total}）：{dst.name}  {rb/1024:.1f} KB")
+                            self.status.set(f"下载中（{idx}/{total}）：{dst.name}  {rb/1024:.1f} KB")
                     download_file(url, dst, progress_cb=per_prog)
                     ok += 1
                 except Exception as e:
@@ -748,7 +728,7 @@ class App(tk.Tk):
             msg = f"下载完成：成功 {ok}，失败 {fail}。保存至 {dest_root}"
             self._log(msg)
             self._set_busy(False, msg)
-            self.after(0, lambda: messagebox.showinfo("下载结果", msg))
+            messagebox.showinfo("下载结果", msg)
         threading.Thread(target=worker, daemon=True).start()
 
     # ============ 上传 ============
@@ -770,25 +750,24 @@ class App(tk.Tk):
         base_url = self.current_url.get().strip()
         subdir = "" if self.upload_to_current.get() else self.upload_subdir.get().strip()
 
-        files = list(self.upload_files)
         self._set_busy(True, "正在上传…")
         def worker():
             try:
-                code, text = multipart_post(base_url, files, subpath=subdir)
+                code, text = multipart_post(base_url, self.upload_files, subpath=subdir)
                 msg = f"上传完成，HTTP {code}"
                 self._log(msg)
                 self._set_busy(False, msg)
-                self.after(0, lambda: messagebox.showinfo("上传结果", "上传成功！请在服务器目录刷新查看。"))
+                messagebox.showinfo("上传结果", "上传成功！请在服务器目录刷新查看。")
             except urllib.error.HTTPError as e:
                 self._set_busy(False, "上传失败")
                 try:
                     detail = e.read(4096).decode(errors='ignore')
                 except Exception:
                     detail = ""
-                self._error(f"上传失败：HTTP {e.code}\n{detail}")
+                messagebox.showerror("上传失败", f"HTTP {e.code}\n{detail}")
             except Exception as e:
                 self._set_busy(False, "上传失败")
-                self._error(f"上传失败：{e}")
+                messagebox.showerror("上传失败", str(e))
         threading.Thread(target=worker, daemon=True).start()
 
     # ============ 辅助 ============

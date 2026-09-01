@@ -1,0 +1,14 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Tool runtime output
+**/downloads/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

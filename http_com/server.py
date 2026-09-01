@@ -2,6 +2,9 @@ import argparse, io, os, sys, json, time, urllib.parse, socket
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
 from pathlib import Path
+from email import policy
+from email.parser import BytesParser
+import tempfile
 
 class UploadHandler(SimpleHTTPRequestHandler):
     # ---- 目录渲染：支持 JSON & HTML ----
@@ -50,14 +53,28 @@ class UploadHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             return io.BytesIO(data)
 
-        # ---- HTML 模式：复用父类页面，并在顶部插入上传表单 ----
-        r = super().list_directory(path)  # 返回 BytesIO
-        extra = (b"<hr><h3>Upload file</h3>"
-                 b"<form ENCTYPE='multipart/form-data' method='post'>"
-                 b"<input name='file' type='file' multiple>"
-                 b"<input type='submit' value='Upload'>"
-                 b"</form><hr>")
-        return io.BytesIO(extra + r.read())
+        # 完整生成页面后再发送长度，避免添加上传表单后正文被截断。
+        title = escape(urllib.parse.unquote(u.path))
+        rows = []
+        for name in names:
+            suffix = "/" if (Path(path) / name).is_dir() else ""
+            href = urllib.parse.quote(name) + suffix
+            rows.append(f'<li><a href="{href}">{escape(name + suffix)}</a></li>')
+        data = (
+            f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+            f'<title>Directory listing for {title}</title></head><body>'
+            f'<h1>Directory listing for {title}</h1>'
+            '<hr><h3>Upload file</h3>'
+            '<form enctype="multipart/form-data" method="post">'
+            '<input name="file" type="file" multiple>'
+            '<input type="submit" value="Upload"></form><hr><ul>'
+            + "".join(rows) + '</ul><hr></body></html>'
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        return io.BytesIO(data)
 
     # ---- 简单上传实现（multipart/form-data） ----
     def do_POST(self):
@@ -71,42 +88,65 @@ class UploadHandler(SimpleHTTPRequestHandler):
             self.send_error(400, "No boundary")
             return
 
-        length = int(self.headers.get('content-length', 0))
-        raw = self.rfile.read(length)
+        try:
+            length = int(self.headers.get('Content-Length', ''))
+            if length <= 0 or self.headers.get('Transfer-Encoding'):
+                raise ValueError("Invalid Content-Length")
+            root = Path(self.directory).resolve()
+            url_path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+            segments = [s for s in url_path.split('/') if s]
+            if any(s in ('.', '..') or any(c in s for c in ('\\', ':', '\x00')) for s in segments):
+                raise ValueError("Invalid upload directory")
+            directory = root.joinpath(*segments).resolve()
+            directory.relative_to(root)
 
-        boundary_bytes = b"--" + boundary.encode()
-        parts = raw.split(boundary_bytes)
+            # ponytail: 保留整包内存解析；超大文件上传需改为流式 multipart。
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError("Incomplete upload")
+            message = BytesParser(policy=policy.default).parsebytes(
+                b'Content-Type: ' + self.headers['Content-Type'].encode('ascii')
+                + b'\r\nMIME-Version: 1.0\r\n\r\n' + raw
+            )
+            if not message.is_multipart() or any(p.defects for p in message.walk()):
+                raise ValueError("Invalid multipart body")
+            files = []
+            for part in message.iter_parts():
+                filename = part.get_filename()
+                if not filename:
+                    continue
+                filename = os.path.basename(filename.replace('\\', '/'))
+                if not filename or filename in ('.', '..') or ':' in filename or '\x00' in filename:
+                    raise ValueError("Invalid filename")
+                target = (directory / filename).resolve()
+                target.relative_to(root)
+                body = part.get_payload(decode=True)
+                if body is None:
+                    raise ValueError("Invalid file body")
+                files.append((target, body))
+            if not files:
+                raise ValueError("No files supplied")
+        except (ValueError, UnicodeError):
+            self.send_error(400, "Invalid upload data or path")
+            return
+
         saved = 0
-
-        for part in parts:
-            if not part or part in (b"--\r\n", b"\r\n"):
-                continue
-            # 每段形如：\r\nHeaders\r\n\r\nBODY\r\n
-            if part.startswith(b"\r\n"):
-                part = part[2:]
-            head, sep, body = part.partition(b"\r\n\r\n")
-            if not sep:
-                continue
-            # 去尾部结语
-            if body.endswith(b"\r\n"):
-                body = body[:-2]
-            # 找文件名
-            filename = None
-            for line in head.split(b"\r\n"):
-                if line.lower().startswith(b"content-disposition:"):
-                    # 兼容不同浏览器的 filename 格式
-                    segs = line.decode(errors="ignore").split(";")
-                    for s in segs:
-                        s = s.strip()
-                        if s.startswith("filename="):
-                            filename = s.split("=", 1)[1].strip().strip('"')
-                            break
-            if not filename:
-                continue
-            filename = os.path.basename(filename)
-            with open(filename, "wb") as f:
-                f.write(body)
-            saved += 1
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            for target, body in files:
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=directory, prefix='.upload-', delete=False) as f:
+                        temp_path = Path(f.name)
+                        f.write(body)
+                    os.replace(temp_path, target)
+                    saved += 1
+                finally:
+                    if temp_path is not None:
+                        temp_path.unlink(missing_ok=True)
+        except OSError:
+            self.send_error(500, "Cannot save uploaded file")
+            return
 
         msg = f"Uploaded {saved} file(s)."
         data = f"<html><body><h3>{msg}</h3><a href='.'>Back</a></body></html>".encode("utf-8")
