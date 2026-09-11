@@ -6,6 +6,8 @@ venv/
 
 # Tool runtime output
 **/downloads/
+# Legacy GUI config; current config lives in the user profile
+http_com/server_gui.json
 
 # Editors and OS
 .vscode/
