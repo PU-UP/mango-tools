@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clash 节点转换器</title>
+  <style>
+    :root {
+      --bg: #14120e;
+      --panel: #1e1b16;
+      --panel-2: #262219;
+      --line: #3a3428;
+      --text: #f3ebe0;
+      --muted: #b8ab96;
+      --mango: #f5a524;
+      --mango-dim: #c47d12;
+      --ok: #7dcf7a;
+      --bad: #e36a5c;
+      --shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(1200px 600px at 10% -10%, #2a2318 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
+    }
+
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(20, 18, 14, 0.85);
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .brand span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    label.mode {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    select, button {
+      font: inherit;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+
+    button.primary {
+      background: var(--mango);
+      color: #1a1408;
+      border-color: var(--mango);
+      font-weight: 700;
+    }
+
+    button.primary:hover { background: #ffb53a; }
+    button:hover { border-color: var(--mango-dim); }
+
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      padding: 14px;
+      min-height: 0;
+    }
+
+    .pane {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .pane-title {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      margin: 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    textarea {
+      flex: 1;
+      width: 100%;
+      min-height: 280px;
+      resize: none;
+      border: 0;
+      outline: none;
+      padding: 14px;
+      background: transparent;
+      color: var(--text);
+      font-family: Consolas, "Cascadia Mono", "Sarasa Mono SC", monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .app-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      padding: 10px 22px 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    #status strong.ok { color: var(--ok); }
+    #status strong.bad { color: var(--bad); }
+    #errors {
+      white-space: pre-wrap;
+      color: var(--bad);
+      max-height: 4.8em;
+      overflow: auto;
+      text-align: right;
+    }
+
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      .app-header, .app-footer { padding-left: 12px; padding-right: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <h1>Clash 节点转换器</h1>
+      <span id="subtitle">vless:// → Clash Meta YAML</span>
+    </div>
+    <div class="controls">
+      <label class="mode">
+        输出
+        <select id="mode">
+          <option value="full">完整配置</option>
+          <option value="proxies">仅 proxies</option>
+        </select>
+      </label>
+      <button class="primary" id="convertBtn">转换</button>
+      <button id="copyBtn">复制</button>
+      <button id="downloadBtn">下载 YAML</button>
+      <button id="clearBtn">清空</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="pane">
+      <h2 class="pane-title">输入链接（每行一条，支持 Quantumult 风格 vless）</h2>
+      <textarea id="input" spellcheck="false" placeholder="vless://...&#10;vless://..."></textarea>
+    </section>
+    <section class="pane">
+      <h2 class="pane-title">Clash 配置</h2>
+      <textarea id="output" readonly spellcheck="false" placeholder="转换结果会显示在这里"></textarea>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <div id="status">尚未转换</div>
+    <div id="errors"></div>
+  </footer>
+
+  <script>
+    const VERSION = "1.0.0";
+    const NETWORK_MAP = {
+      tcp: "tcp",
+      ws: "ws",
+      websocket: "ws",
+      grpc: "grpc",
+      http: "http",
+      h2: "h2",
+      httpupgrade: "httpupgrade",
+      none: "tcp",
+    };
+    const YAML_BOOLISH = /^(true|false|null|yes|no|on|off|y|n|~)$/i;
+
+    const $ = (id) => document.getElementById(id);
+    $("subtitle").textContent = `vless:// → Clash Meta YAML · v${VERSION}`;
+
+    function safeDecode(text) {
+      try {
+        return decodeURIComponent(text);
+      } catch {
+        return text;
+      }
+    }
+
+    function decodeBase64(raw) {
+      try {
+        const padded = raw.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - raw.length % 4) % 4);
+        const binary = atob(padded);
+        return safeDecode(Array.from(binary, (ch) => "%" + ch.charCodeAt(0).toString(16).padStart(2, "0")).join(""));
+      } catch {
+        throw new Error("无法解析节点信息");
+      }
+    }
+
+    function parseAuthority(auth) {
+      const at = auth.lastIndexOf("@");
+      if (at < 0) throw new Error("缺少 server 信息");
+      let user = auth.slice(0, at);
+      const hostport = auth.slice(at + 1);
+      const colon = user.indexOf(":");
+      if (colon >= 0 && colon !== user.length - 1) {
+        user = user.slice(colon + 1);
+      }
+      let host;
+      let portStr;
+      if (hostport.startsWith("[")) {
+        const end = hostport.indexOf("]");
+        if (end < 0) throw new Error("IPv6 地址不完整");
+        host = hostport.slice(1, end);
+        portStr = hostport.slice(end + 2);
+      } else {
+        const split = hostport.lastIndexOf(":");
+        if (split < 0) throw new Error("缺少端口");
+        host = hostport.slice(0, split);
+        portStr = hostport.slice(split + 1);
+      }
+      const port = Number(portStr);
+      if (!user || !host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+        throw new Error("uuid / 服务器 / 端口无效");
+      }
+      return { uuid: user, host, port };
+    }
+
+    function truthy(value) {
+      return value === "1" || value === "true" || value === "yes";
+    }
+
+    function uniqueName(name, used) {
+      const base = (name && String(name).trim()) || "未命名节点";
+      let candidate = base;
+      let i = 2;
+      while (used.has(candidate)) {
+        candidate = `${base} ${i}`;
+        i += 1;
+      }
+      used.add(candidate);
+      return candidate;
+    }
+
+    function parseVless(line) {
+      const trimmed = line.trim();
+      const start = trimmed.search(/vless:\/\//i);
+      const link = start >= 0 ? trimmed.slice(start) : trimmed;
+      const match = link.match(/^vless:\/\/([^?#]+)(?:\?([^#]*))?(?:#(.*))?$/i);
+      if (!match) throw new Error("不是 vless:// 链接");
+
+      const rawUserinfo = match[1];
+      const query = match[2] || "";
+      const fragment = match[3] ? safeDecode(match[3]) : "";
+      const params = new URLSearchParams(query);
+
+      let authority = safeDecode(rawUserinfo);
+      if (!authority.includes("@")) {
+        authority = decodeBase64(rawUserinfo);
+      }
+      const { uuid, host, port } = parseAuthority(authority);
+
+      const pbk = params.get("pbk") || params.get("publicKey") || params.get("public-key") || "";
+      const sid = params.get("sid") || params.get("shortId") || params.get("short-id") || "";
+      const xtls = params.get("xtls") || "";
+      const flowParam = params.get("flow") || "";
+      const security = (params.get("security") || "").toLowerCase();
+      const rawNet = (params.get("type") || params.get("net") || params.get("network") || params.get("obfs") || "tcp").toLowerCase();
+      const network = NETWORK_MAP[rawNet] || "tcp";
+
+      let flow = flowParam;
+      if (!flow && (xtls === "1" || xtls === "2")) flow = "xtls-rprx-vision";
+
+      const tls = truthy(params.get("tls")) || security === "tls" || security === "reality" || Boolean(pbk);
+      const name = params.get("remarks") || params.get("remark") || params.get("name") || fragment || host;
+
+      return {
+        name,
+        type: "vless",
+        server: host,
+        port,
+        uuid,
+        network,
+        tls,
+        udp: params.has("udp") ? truthy(params.get("udp")) : true,
+        tfo: truthy(params.get("tfo")),
+        servername: params.get("peer") || params.get("sni") || params.get("serverName") || "",
+        "client-fingerprint": params.get("fingerprint") || params.get("fp") || "",
+        flow,
+        pbk,
+        sid,
+        path: params.get("path") || params.get("obfs-uri") || "",
+        hostHeader: params.get("host") || params.get("obfs-host") || "",
+        serviceName: params.get("serviceName") || params.get("service_name") || "",
+        insecure: truthy(params.get("allowInsecure") || params.get("insecure") || params.get("skip-cert-verify")),
+      };
+    }
+
+    function yamlScalar(value) {
+      if (typeof value === "boolean") return value ? "true" : "false";
+      if (typeof value === "number") return String(value);
+      const text = String(value);
+      const needsQuote =
+        text === "" ||
+        YAML_BOOLISH.test(text) ||
+        /[\s:#{}[\],&*?|<>=!%@`'"\\]/.test(text) ||
+        /[^\x20-\x7E]/.test(text) ||
+        /^[-?]/.test(text) ||
+        /^\d/.test(text);
+      if (needsQuote) {
+        return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+      }
+      return text;
+    }
+
+    function proxyToYaml(proxy) {
+      const lines = [
+        `  - name: ${yamlScalar(proxy.name)}`,
+        `    type: ${proxy.type}`,
+        `    server: ${yamlScalar(proxy.server)}`,
+        `    port: ${proxy.port}`,
+        `    uuid: ${yamlScalar(proxy.uuid)}`,
+        `    network: ${proxy.network}`,
+        `    tls: ${yamlScalar(proxy.tls)}`,
+        `    udp: ${yamlScalar(proxy.udp)}`,
+      ];
+      if (proxy.tfo) lines.push("    tfo: true");
+      if (proxy.flow) lines.push(`    flow: ${proxy.flow}`);
+      if (proxy.servername) lines.push(`    servername: ${yamlScalar(proxy.servername)}`);
+      if (proxy["client-fingerprint"]) {
+        lines.push(`    client-fingerprint: ${yamlScalar(proxy["client-fingerprint"])}`);
+      }
+      if (proxy.insecure) lines.push("    skip-cert-verify: true");
+      if (proxy.pbk) {
+        lines.push("    reality-opts:");
+        lines.push(`      public-key: ${yamlScalar(proxy.pbk)}`);
+        lines.push(`      short-id: ${yamlScalar(proxy.sid)}`);
+      }
+      if (proxy.network === "ws") {
+        lines.push("    ws-opts:");
+        lines.push(`      path: ${yamlScalar(proxy.path || "/")}`);
+        if (proxy.hostHeader) {
+          lines.push("      headers:");
+          lines.push(`        Host: ${yamlScalar(proxy.hostHeader)}`);
+        }
+      }
+      if (proxy.network === "grpc") {
+        lines.push("    grpc-opts:");
+        lines.push(`      grpc-service-name: ${yamlScalar(proxy.serviceName)}`);
+      }
+      return lines.join("\n");
+    }
+
+    function buildConfig(proxies, mode) {
+      const names = proxies.map((p) => yamlScalar(p.name));
+      const proxyBlock = "proxies:\n" + proxies.map(proxyToYaml).join("\n");
+      if (mode === "proxies") return proxyBlock + "\n";
+
+      const list = names.map((n) => `      - ${n}`).join("\n");
+      return [
+        "mixed-port: 7890",
+        "allow-lan: false",
+        "mode: rule",
+        "log-level: info",
+        "ipv6: false",
+        "external-controller: 127.0.0.1:9090",
+        "",
+        "dns:",
+        "  enable: true",
+        "  enhanced-mode: fake-ip",
+        "  nameserver:",
+        "    - 223.5.5.5",
+        "    - 8.8.8.8",
+        "",
+        proxyBlock,
+        "",
+        "proxy-groups:",
+        "  - name: PROXY",
+        "    type: select",
+        "    proxies:",
+        "      - AUTO",
+        "      - DIRECT",
+        list,
+        "  - name: AUTO",
+        "    type: url-test",
+        "    url: http://www.gstatic.com/generate_204",
+        "    interval: 300",
+        "    proxies:",
+        list,
+        "",
+        "rules:",
+        "  - GEOIP,CN,DIRECT",
+        "  - MATCH,PROXY",
+        "",
+      ].join("\n");
+    }
+
+    function setStatus(html) {
+      $("status").innerHTML = html;
+    }
+
+    function convert() {
+      const rawLines = $("input").value.split(/\r?\n/);
+      const used = new Set();
+      const proxies = [];
+      const errors = [];
+
+      rawLines.forEach((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const proxy = parseVless(trimmed);
+          proxy.name = uniqueName(proxy.name, used);
+          proxies.push(proxy);
+        } catch (err) {
+          errors.push(`第 ${index + 1} 行：${err.message}`);
+        }
+      });
+
+      $("output").value = proxies.length ? buildConfig(proxies, $("mode").value) : "";
+      if (proxies.length) {
+        setStatus(`成功 <strong class="ok">${proxies.length}</strong> 个，失败 <strong class="${errors.length ? "bad" : "ok"}">${errors.length}</strong> 个`);
+      } else {
+        setStatus("没有可转换的 vless 链接");
+      }
+      $("errors").textContent = errors.join("\n");
+      return proxies.length > 0;
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        $("output").focus();
+        $("output").select();
+        document.execCommand("copy");
+      }
+    }
+
+    function downloadYaml(yaml) {
+      const blob = new Blob([yaml], { type: "text/yaml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "clash-meta.yaml";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    $("convertBtn").addEventListener("click", convert);
+    $("mode").addEventListener("change", () => {
+      if ($("input").value.trim()) convert();
+    });
+    $("clearBtn").addEventListener("click", () => {
+      $("input").value = "";
+      $("output").value = "";
+      setStatus("尚未转换");
+      $("errors").textContent = "";
+    });
+    $("copyBtn").addEventListener("click", async () => {
+      if (!$("output").value) convert();
+      if (!$("output").value) return;
+      await copyText($("output").value);
+      const current = $("status").innerHTML;
+      setStatus(current.includes("成功") ? current + " · 已复制" : "已复制到剪贴板");
+    });
+    $("downloadBtn").addEventListener("click", () => {
+      if (!$("output").value) convert();
+      if (!$("output").value) return;
+      downloadYaml($("output").value);
+    });
+    $("input").addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        convert();
+      }
+    });
+  </script>
+</body>
+</html>

@@ -15,6 +15,7 @@
 | 工具 | 用途 |
 | --- | --- |
 | [http_com](http_com/) | 在可信局域网内通过 HTTP 浏览、上传和下载文件 |
+| [clash_converter](clash_converter/) | 把 vless 链接转成 Clash Meta YAML |
 
 `slamlog_dashboard` 是已有的历史工具，当前暂不整理或维护。
 
