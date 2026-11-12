@@ -16,6 +16,7 @@
 | --- | --- |
 | [http_com](http_com/) | 在可信局域网内通过 HTTP 浏览、上传和下载文件 |
 | [clash_converter](clash_converter/) | 把 vless 链接转成 Clash Meta YAML |
+| [chatgpt_launcher](chatgpt_launcher/) | Windows ChatGPT 连接助手：检测默认/代理路径、启动与重启、托盘模式指示 |
 
 `slamlog_dashboard` 是已有的历史工具，当前暂不整理或维护。
 
